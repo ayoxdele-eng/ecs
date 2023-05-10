@@ -1,0 +1,322 @@
+Resources:
+  MyVpc:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: MyVpc
+
+  MySubnetA:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref MyVpc
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: MySubnetA
+
+  MySubnetB:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref MyVpc
+      CidrBlock: '10.0.2.0/24'
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: MySubnetB
+  
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: InternetGateway
+
+  AttachGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref MyVpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref MyVpc
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  PrivateRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref MyVpc
+      Tags:
+        - Key: Name
+          Value: PrivateRouteTable
+
+  PublicRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  MySubnetARouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref MySubnetA
+
+  MySubnetBRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      #RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref MySubnetB        
+  
+  
+  EC2ContainerServiceforEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: ecs-instance-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:CreateCluster
+                  - ecs:DeregisterContainerInstance
+                  - ecs:DiscoverPollEndpoint
+                  - ecs:Poll
+                  - ecs:RegisterContainerInstance
+                  - ecs:StartTask
+                  - ecs:StartTelemetrySession
+                  - ecs:SubmitContainerStateChange
+                  - ecs:SubmitTaskStateChange
+                  - ecs:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:GetRepositoryPolicy
+                  - ecr:DescribeRepositories
+                  - ecr:ListImages
+                  - ecr:BatchGetImage
+                  - ecr:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+  
+  EC2InstanceProfileForEC2:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref EC2ContainerServiceforEC2Role
+
+       
+
+  MyLaunchTemplate:
+    Type: 'AWS::EC2::LaunchTemplate'
+    Properties:
+      LaunchTemplateData:
+        InstanceType: t2.small
+        ImageId: ami-013a451d6c08ef928
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfileForEC2.Arn
+        KeyName: demo
+        NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          Groups:
+          - !Ref TargetSecurityGroup
+      
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo yum update -y && sudo yum install -y ecs-init
+            sudo start ecs
+
+
+            echo ECS_CLUSTER=my-ecs-cluster >> /etc/ecs/ecs.config
+        
+          
+  MyAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      AutoScalingGroupName: MyAutoScalingGroup
+      MinSize: '1'
+      MaxSize: '5'
+      DesiredCapacity: '3'
+      VPCZoneIdentifier:
+        - !Ref MySubnetA
+        - !Ref MySubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref MyLaunchTemplate
+        Version: !GetAtt MyLaunchTemplate.LatestVersionNumber
+      # TargetGroupARNs:
+      #   - !Ref MyTargetGroup      
+      
+
+  ALBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: 'ALB-SG'
+      GroupDescription: 'Security group for the Application Load Balancer'
+      VpcId: !Ref MyVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  TargetSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: 'Targets-SG'
+      GroupDescription: 'Security group for the registered targets'
+      VpcId: !Ref MyVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: '0.0.0.0/0'
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0' 
+        # - IpProtocol: tcp
+        #   FromPort: 80
+        #   ToPort: 80
+        #   SourceSecurityGroupId: !Ref ALBSecurityGroup
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: my-ecs-cluster      
+
+  # ECSCapacityProvider:
+  #   Type: AWS::ECS::CapacityProvider
+  #   Properties:
+  #     Name: my-ecs-capacity-provider-p
+  #     AutoScalingGroupProvider:
+  #       AutoScalingGroupArn: !Ref MyAutoScalingGroup
+  #       ManagedScaling: 
+  #         Status: "ENABLED"
+  #       ManagedTerminationProtection: DISABLED
+
+  # MyCapacityProviderItem:
+  #   Type: "AWS::ECS::CapacityProviderAssociation"
+  #   Properties:
+  #     CapacityProviderArn: !GetAtt ECSCapacityProvider.Arn
+  #     Cluster: !Ref ECSCluster
+  #     AutoScalingGroupProvider: 
+  #       AutoScalingGroupArn: !GetAtt MyAutoScalingGroup.Arn
+  #       ManagedScaling:
+  #         Status: "ENABLED"
+  #         TargetCapacity: 50
+  #       ManagedTerminationProtection: "ENABLED"      
+
+  # ECSClusterCapacityProvider:
+  #   Type: AWS::ECS::ClusterCapacityProviderAssociations
+  #   Properties:
+  #     Cluster: !Ref ECSCluster
+  #     CapacityProviders:
+  #       - !Ref ECSCapacityProvider
+  #     DefaultCapacityProviderStrategy:
+  #       - CapacityProvider: !Ref ECSCapacityProvider
+  #         Weight: 1
+
+  # AsgArn:
+  #   Type: "AWS::CloudFormation::CustomResource"
+  #   Properties:
+  #     ServiceToken: !GetAtt [ AsgArnLambda, Arn ]
+  #     AsgName: !Ref AutoScalingGroup
+  # CapacityProvider:
+  #   Type: "AWS::ECS::CapacityProvider"
+  #   Properties:
+  #     AutoScalingGroupProvider:
+  #       AutoScalingGroupArn: !GetAtt [ AsgArn, arn ]
+  #       ManagedScaling:
+  #         Status: ENABLED
+  #       ManagedTerminationProtection: DISABLED        
+
+  MyLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Name: my-load-balancer
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref MySubnetA
+        - !Ref MySubnetB
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  MyTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    # DependsOn: MyLoadbalancer
+    Properties:
+      Name: my-target-group
+      Protocol: HTTP
+      Port: 80
+      TargetType: ip
+      VpcId: !Ref MyVpc
+
+  MyListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    DependsOn: MyLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref MyLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MyTargetGroup
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      NetworkMode: awsvpc
+      Family: nginx-task
+      ContainerDefinitions:
+        - Name: nginx
+          Image: 556563769160.dkr.ecr.us-east-1.amazonaws.com/demo-nginx-repo:latest
+          Memory: 512
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: MyListener   
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: nginx-service
+      DesiredCount: 2
+      TaskDefinition: !Ref TaskDefinition
+      NetworkConfiguration: 
+        AwsvpcConfiguration:  
+          Subnets: [!Ref MySubnetA, !Ref MySubnetB]
+
+      LoadBalancers:
+        - ContainerName: nginx
+          ContainerPort: 80
+          TargetGroupArn: !Ref MyTargetGroup                      
